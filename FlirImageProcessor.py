@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 ##############################################################################################################
 # FlirImageProcessor.py 
-# Last Update: December 25th 2020
+# Last Update: January 9th 2021
 # V0.1 : Initial Creation
+# V0.2 : Added Average Temperature Box Calculation with Thresholding (Easy way to get average radiator temperature)
 ##############################################################################################################
 #
 # This Script contains a Class FlirImage, Create an object of this class by passing it the filename of the FLIR
@@ -36,6 +37,8 @@
 # Below the Sliderbars are 3 buttons;
 # - The first one is Marker, once pressed, every mouse click in the image will draw a marker and the temperature 
 #   of that location. This will continue untill the Marker Button is pressed again.
+#   When the right mouse button is used i.s.o. the left one, no marker is drawn, but the temperature of the pixel
+#   clicked on will be set as the thresholding temperature for the select box option.
 # - The second button is Select Box, once pressed a selection box can be drawn with the mouse, once a box is drawn
 #   the box can be used for 2 functionalities:
 #   1) Draw Box and calculate and show the average temperature inside the box
@@ -44,6 +47,8 @@
 #   These two functionalities can be selected by means of pressing the appropriate key once the box is selected:
 #   - a or A for average temperature box
 #   - t or T for a new Temperature Overlay in the box.
+#   - h or H for a new Thresholded Temperature overlay box with calculated average temperature. 
+#     (All temperatures below threshold are set to 0.0)
 #   Selecting boxes will continue untill the Select Box Button is pressed again.
 # - The Third button is to save a processed image of the layers shown in the image section of the window.
 #
@@ -79,8 +84,10 @@ class FLIRImage:
       self.MaxTemp=numpy.amax(self.FlirObject['ThermalData'])
       self.ThermalMin = self.MinTemp
       self.ThermalMax = self.MaxTemp
+      self.ThresholdTemperature = 20.0
       self.MeasurementPoints = []
-      self.MeasurementBoxes = []
+      self.AverageMeasurementBoxes = []
+      self.ThresholdedAverageMeasurementBoxes = []
       self.OverlayBoxes = []
       NormalWidth=self.FlirObject['MetaData']['EmbeddedImageWidth']
       NormalHeight=self.FlirObject['MetaData']['EmbeddedImageHeight']
@@ -107,8 +114,8 @@ class FLIRImage:
       #Improving the contrast a bit so it mixes better with the thermal image
       self.NewRGBImage = numpy.array(ImageEnhance.Contrast(Image.fromarray(self.NewRGBImage)).enhance(3.0))
       self.MeasurementPointActive=False
-      self.SelectionBoxHelpText="SelectionBox Active, actions for Selection Box  once drawn are:\nPress the T or t to Scale the colormap to the temperatures present in the selection Box.\nPress the A or a to Calculate the average temperature present in the selection Box."
-      self.MarkerHelpText="Temperature Markers Active, Markers will appear where you click with the mouse in the foto."
+      self.SelectionBoxHelpText="SelectionBox Active, actions for Selection Box  once drawn are:\nPress the T or t to Scale the colormap to the temperatures present in the selection Box.\nPress the A or a to Calculate the average temperature present in the selection Box.\nPress the H or h to Calculate the Average Temperature afther Thresholding the Selection Box with "
+      self.MarkerHelpText="Temperature Markers Active, Markers will appear where you click with the mouse in the foto.\nRight Click will not create a marker but will set that temperature as thresholding temperature."
       
 
    def GetFlirFileData(self):
@@ -138,8 +145,8 @@ class FLIRImage:
       return (FlirDataDict)
       
    def GetMetaData(self):
-      meta_json = subprocess.check_output([self.ExifToolPath, self.ImageName, "-j"])
-      return (json.loads(meta_json.decode())[0])
+      JsonMetaData = subprocess.check_output([self.ExifToolPath, self.ImageName, "-j"])
+      return (json.loads(JsonMetaData.decode())[0])
 
    def GetThermalData(self, PlanckR1, PlanckR2, PlanckB, PlanckF, PlanckO, Emissivity, RAT, ExifByteOrder="Little-endian (Intel, II)"):
       RawData = subprocess.check_output([self.ExifToolPath, "-RawThermalImage", "-b", self.ImageName])
@@ -207,9 +214,11 @@ class FLIRImage:
           self.CreateAverageTemperatureBox()
       if event.key in ['T', 't'] and self.MyToggleSelectorRS.active:
           self.AddOverlayBox()
+      if event.key in ['H', 'h'] and self.MyToggleSelectorRS.active:
+          self.AddAverageThresholdedBox()
       
    def AddMeasurementPointMouseClickCallback(self, event):
-      X1, Y1 = event.xdata, event.ydata
+      X1, Y1, Button = event.xdata, event.ydata, event.button
       if X1 > 1.0 and Y1 > 1.0:
          NewDict = dict()
          NewDict['X'] = X1
@@ -224,8 +233,12 @@ class FLIRImage:
          if not AxesFound:
             NewTemperature=self.FlirObject['ThermalData'][int(Y1/4),int(X1/4)]
          NewDict['Temperature'] = NewTemperature
-         self.MeasurementPoints.append(NewDict)
-         self.PlotMeasurementMarker(NewDict)
+         if Button == 1:
+            self.MeasurementPoints.append(NewDict)
+            self.PlotMeasurementMarker(NewDict)
+         else:
+            #Middle Or Right Button was pressed, set this temperature as Thresholding Temperature
+            self.ThresholdTemperature = NewTemperature
    
    def GetMarkerTextCoordinates(self, X,Y):
       if X > 600:
@@ -321,11 +334,12 @@ class FLIRImage:
       self.PlotList[1].text(7, 38, round(self.MaxTemp,2).__str__(), bbox=dict(facecolor='grey', alpha=0.35), fontsize=10, fontweight='bold', color='white')
       self.PlotList[1].text(7, 448, round(self.MinTemp,2).__str__(), bbox=dict(facecolor='grey', alpha=0.35), fontsize=10, fontweight='bold', color='white')
       self.DrawTemperatureOverlays()
+      self.DrawThresholdedAverageMeasurementBoxes()
       if self.ShowMinMaxTemperature:
          self.PlotMinMaxMarkers()
       for Marker in self.MeasurementPoints:
          self.PlotMeasurementMarker(Marker)
-      self.PlotMeasurementBoxes()
+      self.PlotAverageMeasurementBoxes()
       self.Figure.canvas.draw()
    
    def ClearHelpInfoText(self):   
@@ -358,7 +372,7 @@ class FLIRImage:
          if self.MeasurementPointActive:
             self.PressMeasurementMarkerButton(bla)
          self.MyToggleSelectorRS.set_active(True)
-         self.PlotList[5].text(0.01,0.07,self.SelectionBoxHelpText)
+         self.PlotList[5].text(0.01,0.07,self.SelectionBoxHelpText+round(self.ThresholdTemperature,2).__str__()+" C")
          self.Figure.canvas.draw()
       
    def AddWidgets(self):
@@ -412,6 +426,46 @@ class FLIRImage:
       self.OverlayBoxes.append(OverlayDict)
       self.PlotImages()
 
+   def AddAverageThresholdedBox(self):
+      OverlayDict = dict()
+      InsertX=((int(self.CurrentSelectionBox['X1'])-6)/640.0)
+      InsertY=1.0-((int(self.CurrentSelectionBox['Y2'])+3)/480.0)
+      OverlayDict['PixelWidth']=int(self.CurrentSelectionBox['X2']-self.CurrentSelectionBox['X1'])
+      OverlayDict['PixelHeight']=int(self.CurrentSelectionBox['Y2']-self.CurrentSelectionBox['Y1'])
+      InsertWidth=(OverlayDict['PixelWidth'])/640.0
+      InsertHeight=(OverlayDict['PixelHeight'])/480.0
+      OverlayDict['OverlayAxes'] = inset_axes(self.PlotList[1], width="100%", height="100%", loc='lower left', bbox_to_anchor=(InsertX, InsertY, InsertWidth, InsertHeight), bbox_transform=self.PlotList[1].transAxes)
+      OverlayDict['OverlayAxes'].get_xaxis().set_visible(False)
+      OverlayDict['OverlayAxes'].get_yaxis().set_visible(False)
+      OverlayDict['OverlayAxes'].axis('off')
+      ColorBarHightString = int(100*(OverlayDict['PixelHeight']-38)/OverlayDict['PixelHeight']).__str__()+"%"
+      ColorBarWidthString = int(1000/OverlayDict['PixelWidth']).__str__()+"%"
+      OverlayDict['OverlayColorBarAxes'] = inset_axes(OverlayDict['OverlayAxes'], width=ColorBarWidthString, height=ColorBarHightString, loc="center left") 
+
+      #First Scale Down to the original temperaturemap size
+      NewX1 = int(self.CurrentSelectionBox['X1']/4)
+      NewY1 = int(self.CurrentSelectionBox['Y1']/4)
+      NewX2 = int(self.CurrentSelectionBox['X2']/4)
+      NewY2 = int(self.CurrentSelectionBox['Y2']/4)
+      OverlayDict['TemperatureArray'] = self.FlirObject['ThermalData'][NewY1-1:NewY2,NewX1-1:NewX2]
+      Mask=OverlayDict['TemperatureArray'] > self.ThresholdTemperature
+      MeasurementsArray=[]
+      OverlayDict['TemperatureArray']=OverlayDict['TemperatureArray'] * Mask
+      for row in OverlayDict['TemperatureArray']:
+         for measurement in row:
+            if measurement > 0.0:
+               MeasurementsArray.append(measurement)
+      NumberOfMeasurements=len(MeasurementsArray)
+      OverlayDict['NumberOfMeasurements']=NumberOfMeasurements
+      AverageTemperature=round((sum(MeasurementsArray)/NumberOfMeasurements),2)
+      OverlayDict['AverageTemperature']=AverageTemperature
+      OverlayDict['ThermalImage'] = numpy.array(Image.fromarray(OverlayDict['TemperatureArray']).resize((OverlayDict['PixelWidth'], OverlayDict['PixelHeight']), Image.ANTIALIAS))
+      OverlayDict['RGBImage'] = self.NewRGBImage[int(self.CurrentSelectionBox['Y1']-1):int(self.CurrentSelectionBox['Y2']),int(self.CurrentSelectionBox['X1']-1):int(self.CurrentSelectionBox['X2'])]
+      OverlayDict['ThermalMin'] = numpy.amin(OverlayDict['TemperatureArray'])
+      OverlayDict['ThermalMax'] = numpy.amax(OverlayDict['TemperatureArray'])
+      self.ThresholdedAverageMeasurementBoxes.append(OverlayDict)
+      self.PlotImages()
+
    def DrawTemperatureOverlays(self):
       for overlayDict in self.OverlayBoxes:
          overlayDict['OverlayAxes'].clear()
@@ -422,13 +476,25 @@ class FLIRImage:
          overlayDict['ColorBarRef'].set_ticks([])
          overlayDict['OverlayAxes'].text(5, 12, round(overlayDict['ThermalMax'],2).__str__(), bbox=dict(facecolor='grey', alpha=0.35), fontsize=8, fontweight='bold', color='white')
          overlayDict['OverlayAxes'].text(5, overlayDict['PixelHeight']-8, round(overlayDict['ThermalMin'],2).__str__(), bbox=dict(facecolor='grey', alpha=0.35), fontsize=8, fontweight='bold', color='white')
+
+   def DrawThresholdedAverageMeasurementBoxes(self):
+      for overlayDict in self.ThresholdedAverageMeasurementBoxes:
+         overlayDict['OverlayAxes'].clear()
+         overlayDict['OverlayColorBarAxes'].clear()
+         overlayDict['RGBRef']=overlayDict['OverlayAxes'].imshow(overlayDict['RGBImage'])
+         overlayDict['ThermalRef']=overlayDict['OverlayAxes'].imshow(overlayDict['ThermalImage'], vmin=overlayDict['ThermalMin'], vmax=overlayDict['ThermalMax'], cmap=cm.YlOrRd, interpolation='nearest', alpha=0.75)
+         overlayDict['ColorBarRef']=self.Figure.colorbar(overlayDict['ThermalRef'], cax=overlayDict['OverlayColorBarAxes'], orientation='vertical')
+         overlayDict['ColorBarRef'].set_ticks([])
+         overlayDict['OverlayAxes'].text(5, 12, round(overlayDict['ThermalMax'],2).__str__(), bbox=dict(facecolor='grey', alpha=0.35), fontsize=8, fontweight='bold', color='white')
+         overlayDict['OverlayAxes'].text(5, overlayDict['PixelHeight']-8, round(overlayDict['ThermalMin'],2).__str__(), bbox=dict(facecolor='grey', alpha=0.35), fontsize=8, fontweight='bold', color='white')
+         overlayDict['OverlayAxes'].text((overlayDict['PixelWidth'])/2-100, (overlayDict['PixelHeight'])/2, "Average Temperature = "+round(overlayDict['AverageTemperature'],2).__str__()+" C\nBased on "+overlayDict['NumberOfMeasurements'].__str__()+" Measurements.", bbox=dict(facecolor='grey', alpha=0.35), fontsize=8, fontweight='bold', color='white')
      
    def CreateAverageTemperatureBox(self):
-      self.MeasurementBoxes.append(self.CurrentSelectionBox)
+      self.AverageMeasurementBoxes.append(self.CurrentSelectionBox)
       self.PlotImages()
       
-   def PlotMeasurementBoxes(self):
-      for box in self.MeasurementBoxes:
+   def PlotAverageMeasurementBoxes(self):
+      for box in self.AverageMeasurementBoxes:
          #First Scale Down to the original temperaturemap size
          NewX1 = int(box['X1']/4)
          NewY1 = int(box['Y1']/4)
